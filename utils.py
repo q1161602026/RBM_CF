@@ -29,7 +29,7 @@ def expand(data, k=5):
     return np.array(new).reshape(data.shape[0], data.shape[1] * k)
 
 
-def revert_expected_value(m, k=5, do_round=True):
+def revert_expected_value(m, k=5, do_round=False):
     mask = list(range(1, k+1))
     vround = np.vectorize(round)
 
@@ -39,3 +39,8 @@ def revert_expected_value(m, k=5, do_round=True):
         users = (m.reshape(-1, k) * mask).sum(axis=1)
 
     return np.array(users).reshape(m.shape[0], m.shape[1] // k)
+
+
+def outer(x, y):
+    return x[:, :, np.newaxis] * y[:, np.newaxis, :]
+

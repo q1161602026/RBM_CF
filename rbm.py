@@ -1,94 +1,201 @@
 import tensorflow as tf
 import numpy as np
-
-def outer(x, y):
-    return x[:, :, np.newaxis] * y[:, np.newaxis, :]
+from dataset import load_dataset
+from utils import chunker, revert_expected_value, expand, outer
+from math import sqrt
+import sys
 
 class RBM(object):
-    def __init__(self, num_visble, num_hidden):
-        self.dim = (num_visble, num_hidden)
-        self.num_visble = num_visble
-        self.num_hidden = num_hidden
-        self.create_placeholder()
-        self.add_model()
-        self.optimizer = self.train(self.input)
 
-    def create_placeholder(self):
-        self.input = tf.placeholder(dtype=tf.float32, shape=[None, self.num_visble],
-                                    name="input")
-        self.mask = tf.placeholder(dtype=tf.float32, shape=[None, self.num_visble],
-                                    name="mask")
-    
-    def add_model(self):
+    def __init__(self, num_hidden):
+
+        self.num_hidden = num_hidden
+        self.predict = None
+
+        self.optimizer = None
+
+    def init_model(self, num_visble, num_hidden):
+
+        with tf.variable_scope("model_dim"):
+            self.dim = (num_visble, num_hidden)
+            self.num_visble = num_visble
+            self.num_hidden = num_hidden
+
+        with tf.variable_scope("model_input"):
+            self.input = tf.placeholder(dtype=tf.float32, shape=[None, self.num_visble],
+                                        name="input")
+
+            self.mask = tf.placeholder(dtype=tf.float32, shape=[None, self.num_visble],
+                                       name="mask")
+
         with tf.variable_scope("model"):
+
             self.weights = tf.get_variable(name="weights", shape=self.dim,
                                            dtype=tf.float32)
-            self.hbias = tf.get_variable(name="hbias", shape=[self.num_hidden],
-                                         dtype=tf.float32)
-            self.vbias = tf.get_variable(name="vbias", shape=[self.num_visble],
-                                         dtype=tf.float32)
-            self.prev_gw = tf.get_variable(name="prev_weights", shape=self.dim,
+            self.hid_bias = tf.get_variable(name="hid_bias", shape=[self.num_hidden],
+                                            dtype=tf.float32)
+            self.vis_bias = tf.get_variable(name="vis_bias", shape=[self.num_visble],
+                                            dtype=tf.float32)
+            self.prev_gw = tf.get_variable(name="prev_grad_weights", shape=self.dim,
                                            dtype=tf.float32)
-            self.prev_gbh = tf.get_variable(name="prev_hbias", shape=[self.num_hidden],
-                                         dtype=tf.float32)
-            self.prev_gbv = tf.get_variable(name="prev_vbias", shape=[self.num_visble],
-                                         dtype=tf.float32)
+            self.prev_gbh = tf.get_variable(name="prev_grad_hid_bias", shape=[self.num_hidden],
+                                            dtype=tf.float32)
+            self.prev_gbv = tf.get_variable(name="prev_grad_vis_bias", shape=[self.num_visble],
+                                            dtype=tf.float32)
 
     def sample_hidden(self, vis):
-        activations = tf.nn.sigmoid(tf.matmul(vis, self.weights) + self.hbias)
-        h1_sample = tf.nn.relu(tf.sign(activations - tf.random_uniform(tf.shape(activations))))
-        return h1_sample, activations
+
+        hid_probs = tf.nn.sigmoid(tf.matmul(vis, self.weights) + self.hid_bias)
+        hid_sample = tf.nn.relu(tf.sign(hid_probs - tf.random_uniform(tf.shape(hid_probs))))
+
+        return hid_sample, hid_probs
 
     def sample_visible(self, hid, k=5):
-        activations = tf.nn.sigmoid(tf.matmul(hid, tf.transpose(self.weights)) + self.vbias)
-        k_ones = tf.ones((1,k))
-        partition = tf.expand_dims(tf.reduce_sum(tf.reshape(activations, (-1, self.num_visble // k, k)), 2), -1)
-        #part = [tf.squeeze(x,[1]) for x in tf.split(1, self.num_visble // k, partition)]
-        #print(part[0].get_shape())
-        partition = partition * k_ones
-        activations = activations / tf.reshape(partition , tf.shape(activations))
-        v1_sample = tf.nn.relu(tf.sign(activations - tf.random_uniform(tf.shape(activations))))
-       
-        return v1_sample, activations
 
-    def contrastive_divergence(self, v1):
-        h1, h1a = self.sample_hidden(v1)
-        v2, v2a = self.sample_visible(h1)
-        self.predict = v2a
-        h2, h2a = self.sample_hidden(v2)
-        return [v1, h1, h1a,  v2, v2a, h2, h2a]
+        act = tf.nn.sigmoid(tf.matmul(hid, tf.transpose(self.weights)) + self.vis_bias)
+        partition = tf.expand_dims(tf.reduce_sum(tf.reshape(act, (-1, self.num_visble // k, k)), 2), -1) * tf.ones((1, k))
 
-    def gradient(self, v1, h1, v2, h2a, masks):
-        
-        #gw = tf.matmul(tf.transpose(v1), h1) - tf.matmul(tf.transpose(v2), h2a)
-        #gbv = tf.reduce_mean(v1 - v2, 0) 
-        #gbh = tf.reduce_mean(h1 - h2a, 0)
-        v1h1_mask = outer(masks, h1)
-        gw = tf.reduce_mean(outer(v1, h1) * v1h1_mask - outer(v2, h2a) * v1h1_mask,axis= 0)
-        gbv = tf.reduce_mean((v1 * masks) - (v2 * masks),axis= 0)
-        gbh = tf.reduce_mean(h1 - h2a, axis = 0)
+        vis_probs = act / tf.reshape(partition, tf.shape(act))
+        vis_sample = tf.nn.relu(tf.sign(vis_probs - tf.random_uniform(tf.shape(vis_probs))))
+
+        return vis_sample, vis_probs
+
+    def contrastive_divergence(self, vis_0, k):
+
+        hid_0, hid_probs_0 = self.sample_hidden(vis_0)
+
+        vis_k = vis_0
+        hid_k = hid_0
+
+        vis_probs_k = None
+        hid_probs_k = None
+
+        for i in range(k):
+            vis_k, vis_probs_k = self.sample_visible(hid_k)
+            hid_k, hid_probs_k = self.sample_hidden(vis_k)
+
+        self.predict = vis_probs_k
+
+        return [hid_probs_0, vis_k, hid_probs_k]
+
+    @staticmethod
+    def gradient(vis_0, hid_probs_0, vis_k, hid_probs_k, masks):
+
+        v1h1_mask = outer(masks, hid_probs_0)
+
+        gw = tf.reduce_mean(outer(vis_0, hid_probs_0) * v1h1_mask - outer(vis_k, hid_probs_k) * v1h1_mask, axis=0)
+        gbv = tf.reduce_mean((vis_0 * masks) - (vis_k * masks), axis=0)
+        gbh = tf.reduce_mean(hid_probs_0 - hid_probs_k, axis=0)
+
         return [gw, gbv, gbh]
-    
-    def train(self, vis,  w_lr=0.001, v_lr=0.001,
-                h_lr=0.001, decay=0.0000, T=1,momentum=0.9):
-        v1, h1, h1a, v2, v2a, h2, h2a = self.contrastive_divergence(vis)
-        for _ in range(T-1):
-            v1, h1, h1a, v2, v2a, h2, h2a = self.contrastive_divergence(v2)
-        gw, gbv, gbh = self.gradient(v1, h1a, v2a, h2a, self.mask)
-        if decay:
-            gw -= decay * self.weights
-        update_w = tf.assign(self.weights, 
-                             self.weights + momentum * self.prev_gw + w_lr * gw)
-        update_bh = tf.assign(self.hbias,
-                              self.hbias + momentum * self.prev_gbh + h_lr * gbh)
-        update_bv = tf.assign(self.vbias,
-                              self.vbias + momentum * self.prev_gbv + v_lr * gbv)
-        update_prev_gw = tf.assign(self.prev_gw, gw)
-        update_prev_gbh = tf.assign(self.prev_gbh, gbh)
-        update_prev_gbv = tf.assign(self.prev_gbv, gbv)
-        optimizer = (update_w, update_bh, update_bv, update_prev_gw,
-                     update_prev_gbh, update_prev_gbv)
-        return optimizer
 
+    def set_object(self, w_lr=0.01, v_lr=0.01, h_lr=0.01, momentum=0.9, cdk=1):
 
+        hid_probs_0, vis_k, hid_probs_k = self.contrastive_divergence(self.input, cdk)
+        gw, gbv, gbh = self.gradient(self.input, hid_probs_0, vis_k, hid_probs_k, self.mask)
+
+        update_w = tf.assign(self.weights,
+                             self.weights + w_lr * (momentum * self.prev_gw + gw))
+        update_bh = tf.assign(self.hid_bias,
+                              self.hid_bias + h_lr * (momentum * self.prev_gbh + gbh))
+        update_bv = tf.assign(self.vis_bias,
+                              self.vis_bias + v_lr * (momentum * self.prev_gbv + gbv))
+
+        update_prev_gw = tf.assign(self.prev_gw, momentum * self.prev_gw + gw)
+        update_prev_gbh = tf.assign(self.prev_gbh, momentum * self.prev_gbh + gbh)
+        update_prev_gbv = tf.assign(self.prev_gbv, momentum * self.prev_gbv + gbv)
+
+        optimizer = (update_w, update_bh, update_bv, update_prev_gw, update_prev_gbh, update_prev_gbv)
+        self.optimizer = optimizer
+
+    def fit(self, data_path, sep="\t", user_based=True, epochs=10,
+            batch_size=10, w_lr=0.01, v_lr=0.01, h_lr=0.01, momentum=0.9, cdk=1):
+
+        all_users, all_movies, train_data, test_data = load_dataset(data_path, sep, user_based=user_based)
+
+        self.init_model(len(all_movies) * 5, self.num_hidden)
+
+        init = tf.global_variables_initializer()
+        sess = tf.Session()
+        sess.run(init)
+        print("model created")
+
+        self.set_object(w_lr, v_lr, h_lr, momentum, cdk)
+
+        for e in range(epochs):
+
+            for batch_i, batch in enumerate(chunker(list(train_data.keys()), batch_size)):
+
+                size = min(len(batch), batch_size)
+
+                # create needed binary vectors
+                user_one_hot_ratings = {}
+                masks = {}
+                for user_id in batch:
+
+                    user_ratings = np.array([0.] * len(all_movies))
+                    mask = [0] * (len(all_movies) * 5)
+
+                    for item_id, rat in train_data[user_id]:
+                        user_ratings[all_movies.index(item_id)] = rat
+                        for _i in range(5):
+                            mask[5 * all_movies.index(item_id) + _i] = 1
+
+                    one_hot_ratings = expand(np.array([user_ratings])).astype('float32')
+                    user_one_hot_ratings[user_id] = one_hot_ratings
+                    masks[user_id] = mask
+
+                ratings_batch = [user_one_hot_ratings[el] for el in batch]
+                masks_batch = [masks[iid] for iid in batch]
+                train_batch = np.array(ratings_batch).reshape(size, len(all_movies) * 5)
+                self.set_object()
+                _ = sess.run([self.optimizer], feed_dict={self.input: train_batch, self.mask: masks_batch})
+                sys.stdout.write('.')
+                sys.stdout.flush()
+
+            # test step
+            ratings = []
+            predictions = []
+            for batch in chunker(list(test_data.keys()), batch_size):
+                size = min(len(batch), batch_size)
+
+                # create needed binary vectors
+                user_one_hot_ratings = {}
+                masks = {}
+                for user_id in batch:
+                    user_ratings = [0.] * len(all_movies)
+                    mask = [0] * (len(all_movies) * 5)
+                    for item_id, rat in train_data[user_id]:
+                        user_ratings[all_movies.index(item_id)] = rat
+                        for _i in range(5):
+                            mask[5 * all_movies.index(item_id) + _i] = 1
+                    one_hot_ratings = expand(np.array([user_ratings])).astype('float32')
+                    user_one_hot_ratings[user_id] = one_hot_ratings
+                    masks[user_id] = mask
+
+                positions = {profile_id: pos for pos, profile_id
+                             in enumerate(batch)}
+                ratings_batch = [user_one_hot_ratings[el] for el in batch]
+                test_batch = np.array(ratings_batch).reshape(size, len(all_movies) * 5)
+                predict = sess.run(self.predict, feed_dict={self.input: test_batch})
+                user_preds = revert_expected_value(predict)
+
+                for profile_id in batch:
+                    test_movies = test_data[profile_id]
+                    try:
+                        for movie, rating in test_movies:
+                            current_profile = user_preds[positions[profile_id]]
+                            predicted = current_profile[all_movies.index(movie)]
+                            rating = float(rating)
+                            ratings.append(rating)
+                            predictions.append(predicted)
+                    except Exception:
+                        pass
+
+            vabs = np.vectorize(abs)
+            distances = np.array(ratings) - np.array(predictions)
+
+            mae = vabs(distances).mean()
+            rmse = sqrt((distances ** 2).mean())
+            print("\nepoch: {}, mae/rmse: {}/{}".format(e, mae, rmse))
 
