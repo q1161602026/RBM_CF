@@ -5,14 +5,13 @@ from utils import chunker, revert_expected_value, expand, outer
 from math import sqrt
 import sys
 
+
 class RBM(object):
 
     def __init__(self, num_hidden):
 
         self.num_hidden = num_hidden
         self.predict = None
-
-        self.optimizer = None
 
     def init_model(self, num_visble, num_hidden):
 
@@ -89,13 +88,13 @@ class RBM(object):
 
         return [gw, gbv, gbh]
 
-    def set_object(self, w_lr=0.01, v_lr=0.01, h_lr=0.01, momentum=0.9, cdk=1):
+    def update_weight(self, w_lr, v_lr, h_lr, w_reg, momentum, cdk):
 
         hid_probs_0, vis_k, hid_probs_k = self.contrastive_divergence(self.input, cdk)
         gw, gbv, gbh = self.gradient(self.input, hid_probs_0, vis_k, hid_probs_k, self.mask)
 
         update_w = tf.assign(self.weights,
-                             self.weights + w_lr * (momentum * self.prev_gw + gw))
+                             self.weights + w_lr * (momentum * self.prev_gw + gw) - w_reg * self.weights)
         update_bh = tf.assign(self.hid_bias,
                               self.hid_bias + h_lr * (momentum * self.prev_gbh + gbh))
         update_bv = tf.assign(self.vis_bias,
@@ -106,10 +105,10 @@ class RBM(object):
         update_prev_gbv = tf.assign(self.prev_gbv, momentum * self.prev_gbv + gbv)
 
         optimizer = (update_w, update_bh, update_bv, update_prev_gw, update_prev_gbh, update_prev_gbv)
-        self.optimizer = optimizer
+        return optimizer
 
     def fit(self, data_path, sep="\t", user_based=True, epochs=10,
-            batch_size=10, w_lr=0.01, v_lr=0.01, h_lr=0.01, momentum=0.9, cdk=1):
+            batch_size=10, w_lr=0.01, v_lr=0.01, h_lr=0.01, w_reg=0.001, momentum=0.9, cdk=1):
 
         all_users, all_movies, train_data, test_data = load_dataset(data_path, sep, user_based=user_based)
 
@@ -119,8 +118,6 @@ class RBM(object):
         sess = tf.Session()
         sess.run(init)
         print("model created")
-
-        self.set_object(w_lr, v_lr, h_lr, momentum, cdk)
 
         for e in range(epochs):
 
@@ -148,8 +145,10 @@ class RBM(object):
                 ratings_batch = [user_one_hot_ratings[el] for el in batch]
                 masks_batch = [masks[iid] for iid in batch]
                 train_batch = np.array(ratings_batch).reshape(size, len(all_movies) * 5)
-                self.set_object()
-                _ = sess.run([self.optimizer], feed_dict={self.input: train_batch, self.mask: masks_batch})
+
+                optimizer = self.update_weight(w_lr, v_lr, h_lr, w_reg, momentum, cdk)
+
+                _ = sess.run([optimizer], feed_dict={self.input: train_batch, self.mask: masks_batch})
                 sys.stdout.write('.')
                 sys.stdout.flush()
 
@@ -198,4 +197,3 @@ class RBM(object):
             mae = vabs(distances).mean()
             rmse = sqrt((distances ** 2).mean())
             print("\nepoch: {}, mae/rmse: {}/{}".format(e, mae, rmse))
-
