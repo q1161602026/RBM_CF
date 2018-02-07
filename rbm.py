@@ -28,12 +28,15 @@ class RBM(object):
                                        name="mask")
 
         with tf.variable_scope("model"):
+            normal_initializer = tf.random_normal_initializer(mean=0.0,
+                                                              stddev=sqrt(2.0/(self.num_hidden + self.num_visble)),
+                                                              seed=0, dtype=tf.float32)
 
-            self.weights = tf.get_variable(name="weights", shape=self.dim,
+            self.weights = tf.get_variable(name="weights", shape=self.dim, initializer=normal_initializer,
                                            dtype=tf.float32)
-            self.hid_bias = tf.get_variable(name="hid_bias", shape=[self.num_hidden],
+            self.hid_bias = tf.get_variable(name="hid_bias", shape=[self.num_hidden], initializer=normal_initializer,
                                             dtype=tf.float32)
-            self.vis_bias = tf.get_variable(name="vis_bias", shape=[self.num_visble],
+            self.vis_bias = tf.get_variable(name="vis_bias", shape=[self.num_visble], initializer=normal_initializer,
                                             dtype=tf.float32)
             self.prev_gw = tf.get_variable(name="prev_grad_weights", shape=self.dim,
                                            dtype=tf.float32)
@@ -93,12 +96,9 @@ class RBM(object):
         hid_probs_0, vis_k, hid_probs_k = self.contrastive_divergence(self.input, cdk)
         gw, gbv, gbh = self.gradient(self.input, hid_probs_0, vis_k, hid_probs_k, self.mask)
 
-        update_w = tf.assign(self.weights,
-                             self.weights + w_lr * (momentum * self.prev_gw + gw) - w_reg * self.weights)
-        update_bh = tf.assign(self.hid_bias,
-                              self.hid_bias + h_lr * (momentum * self.prev_gbh + gbh))
-        update_bv = tf.assign(self.vis_bias,
-                              self.vis_bias + v_lr * (momentum * self.prev_gbv + gbv))
+        update_w = tf.assign_add(self.weights, w_lr * (momentum * self.prev_gw + gw) - w_reg * self.weights)
+        update_bh = tf.assign_add(self.hid_bias, h_lr * (momentum * self.prev_gbh + gbh))
+        update_bv = tf.assign_add(self.vis_bias, v_lr * (momentum * self.prev_gbv + gbv))
 
         update_prev_gw = tf.assign(self.prev_gw, momentum * self.prev_gw + gw)
         update_prev_gbh = tf.assign(self.prev_gbh, momentum * self.prev_gbh + gbh)
